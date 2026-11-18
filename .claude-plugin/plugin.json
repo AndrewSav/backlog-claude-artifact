@@ -1,0 +1,35 @@
+{
+  "name": "backlog-artifact",
+  "version": "0.1.0",
+  "description": "Publishes a Backlog.md backlog as a phone-friendly claude.ai Artifact, refreshed automatically after turns that change it.",
+  "author": { "name": "Andrew Savinykh" },
+  "license": "MIT",
+  "keywords": ["backlog.md", "backlog", "artifact", "tasks", "kanban"],
+  "userConfig": {
+    "auto_publish": {
+      "type": "boolean",
+      "title": "Publish automatically",
+      "description": "After a turn that changed the backlog, ask Claude to publish the page. Off: the page is only rendered locally; publish with /backlog-artifact:publish.",
+      "default": true
+    },
+    "publish_interval_minutes": {
+      "type": "number",
+      "title": "Minimum minutes between publishes",
+      "description": "Changes made sooner than this after the last publish wait for a later turn. Each publish costs one extra Claude step over the session's context. 0 publishes after every changed turn.",
+      "default": 15,
+      "min": 0
+    },
+    "include_drafts": {
+      "type": "boolean",
+      "title": "Include drafts",
+      "description": "Show tasks from backlog/drafts as a Draft state.",
+      "default": false
+    },
+    "include_archived": {
+      "type": "boolean",
+      "title": "Include archived tasks",
+      "description": "Show tasks from backlog/archive/tasks as an Archived state.",
+      "default": false
+    }
+  }
+}
