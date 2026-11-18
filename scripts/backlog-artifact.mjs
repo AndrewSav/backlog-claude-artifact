@@ -349,7 +349,7 @@ export function instruction(htmlPath, st, sessionId) {
   } else {
     parts.push(`, icon "list", description "Backlog.md tasks, filterable by state and sortable"`);
   }
-  parts.push('. Do not edit or read the HTML file. After the publish succeeds, end the turn with no further text. If this session has no Artifact tool, end the turn without comment.');
+  parts.push('. Do not edit the HTML file. After the publish succeeds, end the turn with no further text. If this session has no Artifact tool, end the turn without comment.');
   return parts.join('');
 }
 
