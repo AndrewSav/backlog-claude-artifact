@@ -3,8 +3,9 @@
 // ask Claude to publish it as an Artifact when it has changed.
 //
 // Subcommands:
-//   stop          Stop hook. Renders; if the backlog changed and the throttle allows,
-//                 blocks the stop with an instruction to publish.
+//   stop          Stop hook. Renders; if the backlog changed: in server mode uploads it
+//                 directly (no model involvement); in artifact mode, when the throttle
+//                 allows, blocks the stop with an instruction to publish.
 //   record        PostToolUse hook for the Artifact tool. Saves the artifact URL.
 //   instructions  Renders and prints the publish instruction (used by /backlog-artifact:publish).
 //   render [dir]  Renders and prints a summary. For testing.
@@ -13,6 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(HERE, 'template.html');
@@ -36,11 +39,16 @@ export function readOptions(env = process.env) {
     const v = Number(get(key));
     return Number.isFinite(v) && v >= 0 ? v : def;
   };
+  const str = (key) => String(get(key) ?? '').trim();
   return {
     includeDrafts: bool('include_drafts', false),
     includeArchived: bool('include_archived', false),
     autoPublish: bool('auto_publish', true),
     intervalMinutes: num('publish_interval_minutes', 15),
+    publishTarget: str('publish_target').toLowerCase() === 'server' ? 'server' : 'artifact',
+    serverUrl: str('server_url').replace(/\/+$/, ''),
+    serverKey: str('server_key'),
+    sshKey: str('ssh_key'),
   };
 }
 
@@ -75,10 +83,30 @@ function scalar(raw) {
   return unquote(v);
 }
 
+// Block scalars: `key: >-` (folded) or `key: |` (literal), then indented lines.
+// Backlog.md writes long titles as `title: >-`. Trailing newlines are dropped:
+// every value here is displayed, never written back.
+function blockScalar(indicator, lines) {
+  const indents = lines.filter((l) => l.trim()).map((l) => l.match(/^ */)[0].length);
+  const body = lines.map((l) => l.slice(indents.length ? Math.min(...indents) : 0));
+  if (indicator[0] === '|') return body.join('\n').trimEnd();
+  return body.reduce((acc, l) => (l === '' ? acc + '\n' : acc === '' || acc.endsWith('\n') ? acc + l : `${acc} ${l}`), '').trimEnd();
+}
+
 export function parseYaml(text) {
   const obj = {};
   let listKey = null;
-  for (const line of text.split(/\r?\n/)) {
+  const all = text.split(/\r?\n/);
+  for (let i = 0; i < all.length; i++) {
+    const line = all[i];
+    const block = line.match(/^([A-Za-z_][\w-]*):\s+([>|][-+]?)\s*$/);
+    if (block) {
+      const body = [];
+      while (i + 1 < all.length && (/^\s+\S/.test(all[i + 1]) || all[i + 1].trim() === '')) body.push(all[++i]);
+      obj[block[1]] = blockScalar(block[2], body);
+      listKey = null;
+      continue;
+    }
     if (!line.trim() || line.trim().startsWith('#')) continue;
     const item = line.match(/^\s*-\s+(.*)$/);
     if (item && listKey) {
@@ -103,7 +131,7 @@ const asList = (v) => (Array.isArray(v) ? v : v ? [String(v)] : []);
 // ---------- tasks ----------
 
 export function splitFrontmatter(text) {
-  const m = text.match(/^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  const m = text.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { fm: {}, body: text };
   return { fm: parseYaml(m[1]), body: m[2] };
 }
@@ -195,8 +223,11 @@ export const ARCHIVED_STATE = 'Archived';
 export function buildModel(bl, opts) {
   const files = sourceFiles(bl, opts);
   const hash = crypto.createHash('sha256');
+  // The renderer and template are part of the output, so a plugin update republishes.
   hash.update(fs.readFileSync(TEMPLATE_PATH));
-  hash.update(JSON.stringify({ d: opts.includeDrafts, a: opts.includeArchived }));
+  hash.update(fs.readFileSync(fileURLToPath(import.meta.url)));
+  const home = opts.publishTarget === 'server' && opts.serverUrl ? opts.serverUrl + '/' : '';
+  hash.update(JSON.stringify({ d: opts.includeDrafts, a: opts.includeArchived, t: opts.publishTarget, home }));
   let config = {};
   const tasks = [];
   for (const { file, set } of files) {
@@ -230,6 +261,7 @@ export function buildModel(bl, opts) {
     states,
     finalState,
     defaultOn,
+    home,
     tasks,
     generated: new Date().toISOString(),
     hash: hash.digest('hex'),
@@ -321,6 +353,121 @@ export function instruction(htmlPath, st, sessionId) {
   return parts.join('');
 }
 
+// ---------- server publishing ----------
+
+export function slugify(name) {
+  const s = String(name).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64).replace(/-+$/, '');
+  return s || 'backlog';
+}
+
+// Must match signedMessage in server/auth_publish.go.
+export function signedMessage(method, slug, ts, body) {
+  const sum = crypto.createHash('sha256').update(body).digest('hex');
+  return `backlog-publish\n${method}\n${slug}\n${ts}\n${sum}`;
+}
+
+// Windows ships its OpenSSH (whose ssh-agent listens on a named pipe) in
+// Program Files or System32; Git Bash's copies on PATH can't reach that agent.
+function sshTool(name) {
+  if (process.platform === 'win32') {
+    for (const dir of [
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'OpenSSH'),
+      path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH'),
+    ]) {
+      const p = path.join(dir, `${name}.exe`);
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return name;
+}
+
+// Signs with `ssh-keygen -Y sign`. Given a public key, ssh-keygen asks
+// ssh-agent to sign with the matching private key, so the private key is
+// never read here and no passphrase is needed. Returns the armored signature.
+export function sshSign(message, opts) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'backlog-sign-'));
+  try {
+    let keyFile = opts.sshKey;
+    if (keyFile) {
+      if (!keyFile.endsWith('.pub') && fs.existsSync(keyFile + '.pub')) keyFile += '.pub';
+      if (!fs.existsSync(keyFile)) throw new Error(`the ssh_key option points to ${keyFile}, which does not exist`);
+    } else {
+      const r = spawnSync(sshTool('ssh-add'), ['-L'], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+      const line = (r.stdout || '').split(/\r?\n/).find((l) => /^(ssh-|ecdsa-|sk-)/.test(l));
+      if (!line) throw new Error('ssh-agent has no keys (ssh-add -L listed none). Load a key with ssh-add, or set the ssh_key or server_key option');
+      keyFile = path.join(tmp, 'agent-key.pub');
+      fs.writeFileSync(keyFile, line + '\n');
+    }
+    const msgFile = path.join(tmp, 'message');
+    fs.writeFileSync(msgFile, message);
+    const r = spawnSync(sshTool('ssh-keygen'), ['-Y', 'sign', '-n', 'backlog-artifact', '-f', keyFile, msgFile], {
+      encoding: 'utf8', timeout: 15_000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (r.status !== 0 || !fs.existsSync(msgFile + '.sig')) {
+      const why = (r.stderr || (r.error && r.error.message) || 'no output').trim().split(/\r?\n/).pop();
+      throw new Error(`ssh-keygen could not sign (${why})`);
+    }
+    return fs.readFileSync(msgFile + '.sig', 'utf8');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+export async function uploadToServer(r, opts, { fetchImpl = fetch, sign = sshSign, now = Date.now() } = {}) {
+  if (!opts.serverUrl) throw new Error('the server_url option is empty');
+  const slug = slugify(r.model.project);
+  const { hash, ...data } = r.model;
+  const body = JSON.stringify({ project: r.model.project, html: fs.readFileSync(r.paths.html, 'utf8'), data });
+  const headers = { 'Content-Type': 'application/json' };
+  if (opts.serverKey) {
+    headers.Authorization = `Bearer ${opts.serverKey}`;
+  } else {
+    const ts = String(Math.floor(now / 1000));
+    headers['X-Backlog-Timestamp'] = ts;
+    headers['X-Backlog-Signature'] = Buffer.from(sign(signedMessage('PUT', slug, ts, body), opts)).toString('base64');
+  }
+  let res;
+  try {
+    res = await fetchImpl(`${opts.serverUrl}/api/projects/${slug}`, { method: 'PUT', headers, body, signal: AbortSignal.timeout(10_000) });
+  } catch (e) {
+    throw new Error(`could not reach ${opts.serverUrl} (${(e && e.cause && e.cause.code) || (e && e.message) || e})`);
+  }
+  const text = await res.text();
+  let json = {};
+  try { json = JSON.parse(text); } catch { /* not JSON */ }
+  if (!res.ok) throw new Error(`the server answered ${res.status}: ${json.error || text.slice(0, 200)}`);
+  return json.url || `${opts.serverUrl}/p/${slug}`;
+}
+
+const RETRY_AFTER_FAILURE_MS = 60_000;
+
+// Uploads if the backlog changed, records the outcome, and returns a message
+// for the user when there is something new to say (first publish, or a new
+// error). Never asks Claude for anything.
+export async function publishToServer(r, opts, { now = Date.now(), force = false, upload = uploadToServer } = {}) {
+  const st = loadState(r.paths.state);
+  if (!force) {
+    if (st.lastPublishedHash === r.model.hash) return { why: 'unchanged' };
+    if (st.lastError && now - (st.lastAttemptAt || 0) < RETRY_AFTER_FAILURE_MS) return { why: 'backoff' };
+  }
+  st.lastAttemptAt = now;
+  try {
+    const url = await upload(r, opts, { now });
+    const first = st.serverPageUrl !== url;
+    Object.assign(st, { serverPageUrl: url, lastPublishedHash: r.model.hash, lastPublishedAt: now });
+    delete st.lastError;
+    saveState(r.paths.state, st);
+    return { why: 'published', url, message: first ? `Backlog published: ${url}` : undefined };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    try { fs.appendFileSync(path.join(r.paths.dir, 'publish.log'), `${new Date(now).toISOString()} ${msg}\n`); } catch { /* ignore */ }
+    const repeat = st.lastError === msg;
+    st.lastError = msg;
+    saveState(r.paths.state, st);
+    return { why: 'failed', error: msg, message: repeat ? undefined : `backlog-artifact: could not publish the backlog: ${msg}` };
+  }
+}
+
 // ---------- hook entry points ----------
 
 function readStdin() {
@@ -336,6 +483,8 @@ export function decideStop({ input, root, opts, now = Date.now(), entrypoint = p
   if (!findBacklog(root)) return { action: 'none', why: 'no backlog' };
   const r = renderProject(root, opts);
   if (!opts.autoPublish) return { action: 'none', why: 'auto_publish off', r };
+  // Server uploads cost no model tokens, so they need no throttle and work headless too.
+  if (opts.publishTarget === 'server') return { action: 'upload', r };
   // Headless runs (claude -p, the Agent SDK) have no Artifact tool, so asking would only waste a turn.
   if (/^sdk/.test(entrypoint)) return { action: 'none', why: 'headless', r };
   const st = loadState(r.paths.state);
@@ -371,13 +520,17 @@ export function recordPublish({ input, root, now = Date.now() }) {
   return true;
 }
 
-function main() {
+async function main() {
   const [cmd, arg] = process.argv.slice(2);
   const opts = readOptions();
   if (cmd === 'stop') {
     const input = readStdin();
     const d = decideStop({ input, root: projectDir(input), opts });
     if (d.action === 'block') process.stdout.write(JSON.stringify({ decision: 'block', reason: d.reason }));
+    if (d.action === 'upload') {
+      const res = await publishToServer(d.r, opts);
+      if (res.message) process.stdout.write(JSON.stringify({ systemMessage: res.message }));
+    }
     return;
   }
   if (cmd === 'record') {
@@ -389,6 +542,13 @@ function main() {
     const root = projectDir({});
     const r = renderProject(root, opts);
     if (!r) { console.log(`No Backlog.md backlog found: ${path.join(root, 'backlog', 'config.yml')} does not exist.`); return; }
+    if (opts.publishTarget === 'server') {
+      const res = await publishToServer(r, opts, { force: true });
+      console.log(res.url
+        ? `The backlog-artifact plugin already published the backlog to ${res.url}. Tell the user that URL in one line; do not call the Artifact tool.`
+        : `Publishing the backlog to the server failed: ${res.error}. Tell the user that in one line; do not call the Artifact tool.`);
+      return;
+    }
     const st = loadState(r.paths.state);
     st.pendingHash = r.model.hash;
     saveState(r.paths.state, st);
@@ -409,8 +569,8 @@ function main() {
 }
 
 if (process.argv[1] && samePath(process.argv[1], fileURLToPath(import.meta.url))) {
-  try { main(); } catch (e) {
+  main().catch((e) => {
     // A hook must never break the session: log and exit cleanly.
     console.error(`backlog-artifact: ${e && e.stack || e}`);
-  }
+  });
 }

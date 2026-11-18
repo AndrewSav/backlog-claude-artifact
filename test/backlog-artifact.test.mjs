@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   parseYaml, parseTask, idKey, buildModel, findBacklog, decideStop, recordPublish,
-  loadState, outPaths, readOptions,
+  loadState, outPaths, readOptions, uploadToServer, publishToServer, signedMessage, slugify,
 } from '../scripts/backlog-artifact.mjs';
 
 const OPTS = { includeDrafts: false, includeArchived: false, autoPublish: true, intervalMinutes: 15 };
@@ -37,6 +37,14 @@ test('yaml subset: quotes, inline and block lists', () => {
   assert.deepEqual(y.d, ['@me', 'you']);
   assert.deepEqual(y.e, []);
   assert.equal(y.f, '12');
+});
+
+test('yaml block scalars: folded and literal', () => {
+  const y = parseYaml("id: T-1\ntitle: >-\n  CurrentSave: plain explanations, and\n  empty targets\nnotes: |\n  line one\n    indented\n\n  after blank\nstatus: Done\n");
+  assert.equal(y.title, 'CurrentSave: plain explanations, and empty targets');
+  assert.equal(y.notes, 'line one\n  indented\n\nafter blank');
+  assert.equal(y.status, 'Done');
+  assert.equal(y.id, 'T-1');
 });
 
 test('task numbers sort numerically, subtasks after their parent', () => {
@@ -125,6 +133,69 @@ test('headless sessions render but never ask', () => {
   assert.equal(d.why, 'headless');
   assert.ok(fs.existsSync(outPaths(root).html));
   assert.equal(decideStop({ input: {}, root, opts: OPTS, entrypoint: 'cli' }).action, 'block');
+});
+
+test('server mode: uploads on change, reports first publish and new errors once, never blocks', async () => {
+  process.env.BACKLOG_ARTIFACT_OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bla-out-'));
+  const root = makeRepo();
+  const opts = { ...OPTS, publishTarget: 'server', serverUrl: 'http://srv.test', serverKey: 'publish-token-0123456789' };
+  const calls = [];
+  let fail = false;
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (fail) return new Response(JSON.stringify({ error: 'nope' }), { status: 401 });
+    return new Response(JSON.stringify({ url: 'http://srv.test/p/demo' }), { status: 200 });
+  };
+  const upload = (r, o, x) => uploadToServer(r, o, { ...x, fetchImpl });
+
+  const d = decideStop({ input: {}, root, opts, entrypoint: 'sdk-cli' });
+  assert.equal(d.action, 'upload'); // headless is fine in server mode
+  const r1 = await publishToServer(d.r, opts, { upload, now: 1000 });
+  assert.equal(r1.why, 'published');
+  assert.equal(r1.message, 'Backlog published: http://srv.test/p/demo');
+  assert.equal(calls[0].url, 'http://srv.test/api/projects/demo');
+  assert.equal(calls[0].init.method, 'PUT');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer publish-token-0123456789');
+  const sent = JSON.parse(calls[0].init.body);
+  assert.equal(sent.project, 'Demo');
+  assert.match(sent.html, /"home":"http:\/\/srv\.test\/"/);
+  assert.equal(sent.data.tasks.length, 3);
+
+  assert.equal((await publishToServer(d.r, opts, { upload, now: 2000 })).why, 'unchanged');
+
+  fs.appendFileSync(path.join(root, 'backlog', 'tasks', 'task-1 - a.md'), '\nchanged');
+  fail = true;
+  const d2 = decideStop({ input: {}, root, opts });
+  const f1 = await publishToServer(d2.r, opts, { upload, now: 3000 });
+  assert.equal(f1.why, 'failed');
+  assert.match(f1.message, /answered 401: nope/);
+  assert.equal((await publishToServer(d2.r, opts, { upload, now: 4000 })).why, 'backoff');
+  const f2 = await publishToServer(d2.r, opts, { upload, now: 3000 + 61_000 });
+  assert.equal(f2.why, 'failed');
+  assert.equal(f2.message, undefined); // same error: not repeated
+  fail = false;
+  const ok = await publishToServer(d2.r, opts, { upload, now: 3000 + 122_000 });
+  assert.equal(ok.why, 'published');
+  assert.equal(ok.message, undefined); // same URL as before: quiet
+  assert.match(fs.readFileSync(path.join(outPaths(root).dir, 'publish.log'), 'utf8'), /nope/);
+});
+
+test('server mode with SSH signs the exact body, slug and method', async () => {
+  process.env.BACKLOG_ARTIFACT_OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bla-out-'));
+  const root = makeRepo();
+  const opts = { ...OPTS, publishTarget: 'server', serverUrl: 'http://srv.test', serverKey: '' };
+  const d = decideStop({ input: {}, root, opts });
+  let signed, init;
+  await uploadToServer(d.r, opts, {
+    now: 1_800_000_000_000,
+    sign: (msg) => { signed = msg; return 'ARMORED'; },
+    fetchImpl: async (u, i) => { init = i; return new Response('{}', { status: 200 }); },
+  });
+  assert.equal(init.headers['X-Backlog-Timestamp'], '1800000000');
+  assert.equal(Buffer.from(init.headers['X-Backlog-Signature'], 'base64').toString(), 'ARMORED');
+  assert.equal(signed, signedMessage('PUT', 'demo', '1800000000', init.body));
+  assert.equal(slugify('Game servers'), 'game-servers');
+  assert.equal(slugify('  ÜeSave/Game  '), 'uesave-game');
 });
 
 test('no backlog: nothing happens', () => {

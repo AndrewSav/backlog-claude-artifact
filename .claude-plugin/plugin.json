@@ -1,11 +1,29 @@
 {
   "name": "backlog-artifact",
-  "version": "0.1.1",
-  "description": "Publishes a Backlog.md backlog as a phone-friendly claude.ai Artifact, refreshed automatically after turns that change it.",
-  "author": { "name": "Andrew Savinykh" },
+  "version": "0.2.0",
+  "description": "Publishes a Backlog.md backlog as a phone-friendly page, either as a claude.ai Artifact or to your own backlog server, refreshed after turns that change it.",
+  "author": {
+    "name": "Andrew Savinykh"
+  },
   "license": "MIT",
-  "keywords": ["backlog.md", "backlog", "artifact", "tasks", "kanban"],
+  "keywords": [
+    "backlog.md",
+    "backlog",
+    "artifact",
+    "tasks",
+    "kanban"
+  ],
   "userConfig": {
+    "publish_target": {
+      "type": "string",
+      "title": "Publish to",
+      "description": "artifact: a claude.ai Artifact (each publish costs one extra Claude step). server: upload straight to your backlog server (no model cost).",
+      "options": [
+        "artifact",
+        "server"
+      ],
+      "default": "artifact"
+    },
     "auto_publish": {
       "type": "boolean",
       "title": "Publish automatically",
@@ -15,9 +33,31 @@
     "publish_interval_minutes": {
       "type": "string",
       "title": "Minimum minutes between publishes",
-      "description": "Changes made sooner than this after the last publish wait for a later turn. Each publish costs one extra Claude step over the session's context. 0 publishes after every changed turn.",
-      "options": ["0", "5", "15", "30", "60"],
+      "description": "Artifact mode only: changes made sooner than this after the last publish wait for a later turn. Each publish costs one extra Claude step over the session's context. 0 publishes after every changed turn. Server mode publishes every change.",
+      "options": [
+        "0",
+        "5",
+        "15",
+        "30",
+        "60"
+      ],
       "default": "15"
+    },
+    "server_url": {
+      "type": "string",
+      "title": "Server URL",
+      "description": "Server mode: the backlog server, e.g. https://backlog.example.com"
+    },
+    "server_key": {
+      "type": "string",
+      "title": "Server publish token",
+      "description": "Server mode: a publish token from the server's publish_tokens file. Leave empty to sign with your SSH key instead.",
+      "sensitive": true
+    },
+    "ssh_key": {
+      "type": "string",
+      "title": "SSH public key file",
+      "description": "Server mode, when no publish token is set: the public key to sign with (its private key must be in ssh-agent). Empty: the first key ssh-agent lists."
     },
     "include_drafts": {
       "type": "boolean",

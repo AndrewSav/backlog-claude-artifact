@@ -1,14 +1,18 @@
 {
   "name": "backlog-artifact",
   "description": "Backlog.md as a claude.ai Artifact",
-  "owner": { "name": "Andrew Savinykh" },
+  "owner": {
+    "name": "Andrew Savinykh"
+  },
   "plugins": [
     {
       "name": "backlog-artifact",
-      "description": "Publishes a Backlog.md backlog as a phone-friendly claude.ai Artifact, refreshed automatically after turns that change it.",
-      "version": "0.1.1",
+      "description": "Publishes a Backlog.md backlog as a phone-friendly page, either as a claude.ai Artifact or to your own backlog server, refreshed after turns that change it.",
+      "version": "0.2.0",
       "source": "./",
-      "author": { "name": "Andrew Savinykh" }
+      "author": {
+        "name": "Andrew Savinykh"
+      }
     }
   ]
 }

@@ -1,6 +1,9 @@
 # backlog-artifact
 
-A Claude Code plugin that publishes a [Backlog.md](https://github.com/MrLesk/Backlog.md) backlog as a claude.ai Artifact. The page works well on a phone, and it is republished automatically after turns that change the backlog.
+A Claude Code plugin that publishes a [Backlog.md](https://github.com/MrLesk/Backlog.md) backlog as a page that works well on a phone, and republishes it automatically after turns that change the backlog. It publishes to one of two places:
+
+- **A claude.ai Artifact.** Nothing to host, but each publish costs one extra Claude step.
+- **Your own backlog server** (`server/`, a small Go service). The hook uploads the page directly, so publishing costs no model tokens at all. The server lists every published project and serves each page behind Google sign-in or view-key links.
 
 The page has no swimlanes. Each state in your `backlog/config.yml` gets a toggle chip with a task count, and you can turn on any combination. All states except the final one (usually Done) are on by default. Statuses that appear in tasks but not in the config get chips too, so no task is hidden. You can sort by last change, creation time, task number (subtasks sort numerically, so 1, 1.2, 1.10, 2), priority, board order or title, in either direction, and filter by ID, title or label. Tap a task to see its description, acceptance criteria, plan and notes.
 
@@ -13,7 +16,7 @@ The page has no swimlanes. Each state in your `backlog/config.yml` gets a toggle
 
 Requires Node.js 18 or newer on `PATH`. Backlog.md is installed through npm or bun, so you most likely have it already.
 
-## How it works
+## How it works (Artifact mode)
 
 Only Claude's Artifact tool can publish an artifact, so a hook alone can't do it. At the end of every turn, a `Stop` hook:
 
@@ -30,9 +33,48 @@ Headless runs (`claude -p`, the Agent SDK) have no Artifact tool, so there the h
 
 Each publish is one extra Claude step. It re-reads the session's context (mostly from the prompt cache) and adds a few hundred output tokens. In a long session with a large context that cost adds up, which is why the default limit is one publish every 15 minutes. Changes made in between are included in the next publish. Turns that don't change the backlog cost nothing. Edits made at the very end of a session are published on the next turn that ends after the interval, or straight away with `/backlog-artifact:publish`.
 
+## Server mode
+
+Set `publish_target` to `server` and `server_url` to your server. At the end of every turn that changed the backlog, the `Stop` hook uploads the page itself, in well under a second, without involving Claude. It works in headless runs too. The first publish and any new error show up as a one-line message in the session, and errors are also logged to `.claude/backlog-artifact/publish.log`. After a failure the hook waits a minute before retrying.
+
+**Publishing auth**, in order:
+
+1. `server_key`: a static publish token, sent as a Bearer token.
+2. Otherwise an SSH signature. The hook runs `ssh-keygen -Y sign` with a public key, and ssh-agent signs with the matching private key, so the plugin never reads a private key file and never needs a passphrase. That is the same key setup `git push` to GitHub uses. The key is `ssh_key` if set, otherwise the first key `ssh-add -L` lists. On Windows the hook uses the Windows OpenSSH tools in `Program Files\OpenSSH` or `System32\OpenSSH`, because Git Bash's copies can't reach the Windows agent. Each signature covers the method, the project, a timestamp and a hash of the upload, and the server accepts it once, within five minutes.
+
+The project's address is its `project_name` in lower case with hyphens, for example `/p/blueprinceandrew`. The same backlog published from two machines lands on one page.
+
+### Running the server
+
+The image is `andrewsav/backlog-server`, built by `.github/workflows/server-image.yml` on every push to `main` that touches `server/`. That workflow needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. It listens on port 8080 and is meant to sit behind a TLS-terminating proxy such as Traefik.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BASE_URL` | `http://localhost:8080` | The public address. Cookies are `Secure` when it starts with https. |
+| `SESSION_SECRET` | (required) | 32+ characters for signing cookies (`openssl rand -hex 32`). |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | empty | Google OAuth web client, redirect URI `<BASE_URL>/auth/callback`. Leave both empty to turn off Google sign-in. |
+| `VIEW_ALLOWED_EMAILS` | empty | Google accounts allowed to view, comma-separated. |
+| `DATA_DIR` | `/data` | Where pages are stored. |
+| `PUBLISH_AUTHORIZED_KEYS_FILE` | `/config/publish_authorized_keys` | SSH public keys that may publish (authorized_keys format). |
+| `PUBLISH_TOKENS_FILE` | `/config/publish_tokens` | Static publish tokens, one `name:token` per line. |
+| `VIEW_TOKENS_FILE` | `/config/view_tokens` | Static view tokens, one `name:token` per line. |
+
+The three files are re-read when they change, so adding or removing a key needs no restart. Removing a view token or an allowed email also signs out browsers that used it. Publish and view tokens are separate lists: a view token can never publish, and a publish token can't view.
+
+| Route | Who | What |
+|---|---|---|
+| `GET /` | viewer | List of published projects with per-state counts |
+| `GET /p/<slug>` | viewer | The backlog page |
+| `GET /api/projects`, `GET /api/projects/<slug>` | viewer | JSON: the list, or one project with its full task data |
+| `PUT`/`DELETE /api/projects/<slug>` | publisher | Publish or remove a project |
+| `?key=<view token>` on any page | anyone | Signs the browser in for 30 days and redirects without the key |
+| `/auth/login`, `/auth/logout` | anyone | Google sign-in and sign-out |
+
+Run the server's tests with `cd server && go test ./...`.
+
 ## Commands
 
-- `/backlog-artifact:publish` renders and publishes now, ignoring the interval.
+- `/backlog-artifact:publish` renders and publishes now, ignoring the interval. In server mode it uploads directly.
 
 ## Options
 
@@ -40,8 +82,12 @@ Set these when you enable the plugin, or later in `/plugin` → backlog-artifact
 
 | Option | Default | Effect |
 |---|---|---|
+| `publish_target` | `artifact` | `artifact` or `server`. |
 | `auto_publish` | `true` | Publish automatically. When off, the page is still rendered locally and you publish with the command. |
-| `publish_interval_minutes` | `15` | Minimum minutes between automatic publishes: 0, 5, 15, 30 or 60. `0` publishes after every turn that changed the backlog. |
+| `publish_interval_minutes` | `15` | Artifact mode: minimum minutes between automatic publishes, one of 0, 5, 15, 30 or 60. `0` publishes after every turn that changed the backlog. Server mode publishes every change. |
+| `server_url` | empty | Server mode: the server's address, for example `https://backlog.example.com`. |
+| `server_key` | empty | Server mode: a static publish token, kept in secure storage. Leave empty to sign with SSH. |
+| `ssh_key` | empty | Server mode without a token: the public key file to sign with. Empty means the first key in ssh-agent. |
 | `include_drafts` | `false` | Show `backlog/drafts` as a Draft chip. |
 | `include_archived` | `false` | Show `backlog/archive/tasks` as an Archived chip (off by default even when included). |
 
