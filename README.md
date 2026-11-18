@@ -46,7 +46,7 @@ The project's address is its `project_name` in lower case with hyphens, for exam
 
 ### Running the server
 
-The image is `andrewsav/backlog-server`, built by `.github/workflows/server-image.yml` on every push to `main` that touches `server/`. That workflow needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. It listens on port 8080 and is meant to sit behind a TLS-terminating proxy such as Traefik.
+The image is `andrewsav/backlog-server`, built by `.github/workflows/server-image.yml` on every push to `main` that touches `server/`. That workflow needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. It listens on port 8080 and is meant to sit behind a TLS-terminating proxy such as Traefik. The container starts as root only to take ownership of `DATA_DIR`, since Docker creates missing bind-mount folders as root. It then drops to uid 65532 before serving, so the data folder needs no manual `chown`. The config files must be readable by that user, which mode 644 (the default) is.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -58,6 +58,7 @@ The image is `andrewsav/backlog-server`, built by `.github/workflows/server-imag
 | `PUBLISH_AUTHORIZED_KEYS_FILE` | `/config/publish_authorized_keys` | SSH public keys that may publish (authorized_keys format). |
 | `PUBLISH_TOKENS_FILE` | `/config/publish_tokens` | Static publish tokens, one `name:token` per line. |
 | `VIEW_TOKENS_FILE` | `/config/view_tokens` | Static view tokens, one `name:token` per line. |
+| `RUN_AS_UID`, `RUN_AS_GID` | `65532` | The user to drop to after taking ownership of `DATA_DIR`. `0` keeps running as root. |
 
 The three files are re-read when they change, so adding or removing a key needs no restart. Removing a view token or an allowed email also signs out browsers that used it. Publish and view tokens are separate lists: a view token can never publish, and a publish token can't view.
 

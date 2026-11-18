@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,13 @@ type Config struct {
 func env(key, def string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(env(key, "")); err == nil {
+		return n
 	}
 	return def
 }
@@ -69,6 +77,9 @@ func main() {
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if err := dropPrivileges(cfg.DataDir); err != nil {
+		log.Fatalf("startup: %v", err)
 	}
 	s, err := NewServer(cfg)
 	if err != nil {
