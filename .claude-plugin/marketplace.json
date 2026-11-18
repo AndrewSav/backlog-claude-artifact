@@ -6,7 +6,7 @@
     {
       "name": "backlog-artifact",
       "description": "Publishes a Backlog.md backlog as a phone-friendly claude.ai Artifact, refreshed automatically after turns that change it.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./",
       "author": { "name": "Andrew Savinykh" }
     }

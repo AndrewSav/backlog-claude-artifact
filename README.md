@@ -41,7 +41,7 @@ Set these when you enable the plugin, or later in `/plugin` → backlog-artifact
 | Option | Default | Effect |
 |---|---|---|
 | `auto_publish` | `true` | Publish automatically. When off, the page is still rendered locally and you publish with the command. |
-| `publish_interval_minutes` | `15` | Minimum minutes between automatic publishes. `0` publishes after every turn that changed the backlog. |
+| `publish_interval_minutes` | `15` | Minimum minutes between automatic publishes: 0, 5, 15, 30 or 60. `0` publishes after every turn that changed the backlog. |
 | `include_drafts` | `false` | Show `backlog/drafts` as a Draft chip. |
 | `include_archived` | `false` | Show `backlog/archive/tasks` as an Archived chip (off by default even when included). |
 
