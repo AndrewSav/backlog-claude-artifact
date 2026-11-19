@@ -121,6 +121,8 @@ main .wrap { padding-block: 14px 40px; }
 .detail p { margin: 6px 0; max-width: 70ch; overflow-wrap: anywhere; }
 .detail ul, .detail ol { margin: 6px 0; padding-left: 20px; }
 .detail li { margin: 2px 0; overflow-wrap: anywhere; }
+.detail li > ul, .detail li > ol { margin: 2px 0; }
+.detail li > p { margin: 4px 0; }
 .detail li.cb { list-style: none; margin-left: -20px; display: flex; gap: 6px; }
 .detail li.cb .box { flex: none; font-family: var(--font-mono); color: var(--muted); }
 .detail li.cb.done .box { color: var(--st-final); }
@@ -268,10 +270,29 @@ main .wrap { padding-block: 14px 40px; }
       .replace(/(^|[^\w*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
     return s.replace(/\u0000(\d+)\u0000/g, function (_, i) { return "<code>" + esc(codes[+i]) + "</code>"; });
   }
+  // Lists nest by indentation, as in CommonMark: an item indented under
+  // another opens a sub-list inside it. Items are closed lazily, so sub-lists
+  // and continuation lines land inside the item above them, and a blank line
+  // between items keeps the list (and its numbering) going.
   function md(src) {
-    var lines = src.split("\n"), out = [], i = 0, para = [], list = null;
+    var lines = src.split("\n"), out = [], i = 0, para = [], stack = [], prevBlank = false;
     function flushPara() { if (para.length) { out.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; } }
-    function closeList() { if (list) { out.push("</" + list + ">"); list = null; } }
+    function closeTo(indent) {
+      while (stack.length && stack[stack.length - 1].indent > indent) out.push("</li></" + stack.pop().type + ">");
+    }
+    function closeList() { closeTo(-1); }
+    function item(type, indent, html, cls, num) {
+      flushPara();
+      closeTo(indent);
+      var top = stack[stack.length - 1];
+      if (top && top.indent === indent && top.type !== type) { out.push("</li></" + stack.pop().type + ">"); top = stack[stack.length - 1]; }
+      if (top && top.indent === indent) out.push("</li>");
+      else {
+        out.push("<" + type + (type === "ol" && num > 1 ? ' start="' + num + '"' : "") + ">");
+        stack.push({ type: type, indent: indent });
+      }
+      out.push("<li" + (cls ? ' class="' + cls + '"' : "") + ">" + html);
+    }
     while (i < lines.length) {
       var l = lines[i], m;
       if (/^\s*```/.test(l)) {
@@ -290,17 +311,23 @@ main .wrap { padding-block: 14px 40px; }
         continue;
       }
       if ((m = l.match(/^(#{1,6})\s+(.*)$/))) { flushPara(); closeList(); out.push("<h" + Math.min(m[1].length + 3, 6) + ">" + inline(m[2]) + "</h" + Math.min(m[1].length + 3, 6) + ">"); i++; continue; }
-      if ((m = l.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/))) {
-        flushPara(); if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
-        var done = m[1] !== " ";
-        out.push('<li class="cb' + (done ? " done" : "") + '"><span class="box">' + (done ? "[x]" : "[ ]") + "</span><span>" + inline(m[2]) + "</span></li>");
-        i++; continue;
+      if ((m = l.match(/^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$/))) {
+        var done = m[2] !== " ";
+        item("ul", m[1].length, '<span class="box">' + (done ? "[x]" : "[ ]") + "</span><span>" + inline(m[3]) + "</span>", "cb" + (done ? " done" : ""));
+        prevBlank = false; i++; continue;
       }
-      if ((m = l.match(/^\s*[-*+]\s+(.*)$/))) { flushPara(); if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; } out.push("<li>" + inline(m[1]) + "</li>"); i++; continue; }
-      if ((m = l.match(/^\s*\d+[.)]\s+(.*)$/))) { flushPara(); if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; } out.push("<li>" + inline(m[1]) + "</li>"); i++; continue; }
-      if (!l.trim()) { flushPara(); closeList(); i++; continue; }
-      if (list && /^\s{2,}\S/.test(l)) { out[out.length - 1] = out[out.length - 1].replace(/<\/li>$/, " " + inline(l.trim()) + "</li>"); i++; continue; }
-      closeList(); para.push(l.trim()); i++;
+      if ((m = l.match(/^(\s*)[-*+]\s+(.*)$/))) { item("ul", m[1].length, inline(m[2])); prevBlank = false; i++; continue; }
+      if ((m = l.match(/^(\s*)(\d+)[.)]\s+(.*)$/))) { item("ol", m[1].length, inline(m[3]), "", +m[2]); prevBlank = false; i++; continue; }
+      if (!l.trim()) { flushPara(); prevBlank = true; i++; continue; }
+      if (stack.length) {
+        // Inside a list: an indented line continues the current item (after a
+        // blank line, as a new paragraph in it); so does an unindented line
+        // straight after an item ("lazy continuation"). Anything else ends the list.
+        if (/^\s+\S/.test(l)) { out.push(prevBlank ? "<p>" + inline(l.trim()) + "</p>" : " " + inline(l.trim())); prevBlank = false; i++; continue; }
+        if (!prevBlank) { out.push(" " + inline(l.trim())); i++; continue; }
+        closeList();
+      }
+      para.push(l.trim()); prevBlank = false; i++;
     }
     flushPara(); closeList();
     return out.join("");

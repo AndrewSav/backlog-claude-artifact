@@ -202,3 +202,43 @@ test('no backlog: nothing happens', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bla-none-'));
   assert.equal(decideStop({ input: {}, root, opts: OPTS }).why, 'no backlog');
 });
+
+// ---- the page's markdown formatter (runs in the browser; tested here) ----
+
+function loadMd() {
+  const tpl = fs.readFileSync(new URL('../scripts/template.html', import.meta.url), 'utf8');
+  const src = tpl.slice(tpl.indexOf('// ---- tiny markdown ----'), tpl.indexOf('// ---- cards ----'));
+  return new Function(`${src}; return md;`)();
+}
+
+test('markdown: bullets nested under numbered items keep the numbering', () => {
+  const md = loadMd();
+  const html = md([
+    '1. Approach: first.',
+    '2. Server, new file Spoilers.cs:',
+    '   - per-request flag;',
+    '   - planned-location helpers.',
+    '   Marked one-line hooks in upstream files:',
+    '   - MapDataServer.Route sets the flag.',
+    '3. Page, new file spoilers.js:',
+    '   - the toggle;',
+    '4. Flipping the toggle.',
+  ].join('\n'));
+  assert.equal(html,
+    '<ol><li>Approach: first.</li>' +
+    '<li>Server, new file Spoilers.cs:<ul><li>per-request flag;</li><li>planned-location helpers. Marked one-line hooks in upstream files:</li><li>MapDataServer.Route sets the flag.</li></ul></li>' +
+    '<li>Page, new file spoilers.js:<ul><li>the toggle;</li></ul></li>' +
+    '<li>Flipping the toggle.</li></ol>');
+});
+
+test('markdown: blank lines between items, start numbers, checkboxes, list end', () => {
+  const md = loadMd();
+  assert.equal(md('1. a\n\n2. b\n\n   more about b\n\nAfter.'),
+    '<ol><li>a</li><li>b<p>more about b</p></li></ol><p>After.</p>');
+  assert.equal(md('3. c\n4. d'), '<ol start="3"><li>c</li><li>d</li></ol>');
+  assert.equal(md('- [x] #1 done\n- [ ] #2 todo'),
+    '<ul><li class="cb done"><span class="box">[x]</span><span>#1 done</span></li><li class="cb"><span class="box">[ ]</span><span>#2 todo</span></li></ul>');
+  assert.equal(md('- a\n  - b\n    - c\n- d'), '<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>');
+  assert.equal(md('- a\n1. b'), '<ul><li>a</li></ul><ol><li>b</li></ol>');
+  assert.equal(md('Intro\n- a\n## H'), '<p>Intro</p><ul><li>a</li></ul><h5>H</h5>');
+});
