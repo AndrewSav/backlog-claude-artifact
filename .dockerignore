@@ -1,0 +1,8 @@
+# The image needs only the Go sources and the one shared script.
+*
+!go.mod
+!go.sum
+!assets.go
+!server/*.go
+!plugin/shared/list-controls.js
+server/*_test.go

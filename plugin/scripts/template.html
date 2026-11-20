@@ -168,14 +168,13 @@ main .wrap { padding-block: 14px 40px; }
   var KEY = "backlog-artifact:" + DATA.project;
 
   function load() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(ui)); } catch (e) {} }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify({ on: ui.on, known: ui.known, sort: ctl.sort, desc: ctl.desc })); } catch (e) {}
+  }
 
   var saved = load();
   var ui = {
-    on: Array.isArray(saved.on) ? saved.on.filter(function (s) { return DATA.states.indexOf(s) >= 0; }) : DATA.defaultOn.slice(),
-    sort: saved.sort || "updated",
-    desc: typeof saved.desc === "boolean" ? saved.desc : true,
-    q: ""
+    on: Array.isArray(saved.on) ? saved.on.filter(function (s) { return DATA.states.indexOf(s) >= 0; }) : DATA.defaultOn.slice()
   };
   if (Array.isArray(saved.on) && saved.known) {
     DATA.states.forEach(function (s) { if (saved.known.indexOf(s) < 0 && DATA.defaultOn.indexOf(s) >= 0) ui.on.push(s); });
@@ -227,15 +226,6 @@ main .wrap { padding-block: 14px 40px; }
     $("chips").appendChild(b);
   });
 
-  $("sort").value = ui.sort;
-  $("sort").addEventListener("change", function () {
-    ui.sort = this.value;
-    ui.desc = ui.sort === "updated" || ui.sort === "created" || ui.sort === "priority";
-    save(); render();
-  });
-  $("dir").addEventListener("click", function () { ui.desc = !ui.desc; save(); render(); });
-  $("q").addEventListener("input", function () { ui.q = this.value.trim().toLowerCase(); render(); });
-
   // ---- sorting ----
   var PRI = { high: 3, medium: 2, low: 1 };
   function cmpKey(a, b) {
@@ -257,6 +247,14 @@ main .wrap { padding-block: 14px 40px; }
     },
     title: function (a, b) { return a.title.localeCompare(b.title); }
   };
+
+  /*__LIST_CONTROLS__*/
+  var ctl = listControls({
+    sortEl: $("sort"), dirEl: $("dir"), qEl: $("q"), sorts: SORTS,
+    defaultSort: "updated", descByDefault: ["updated", "created", "priority"],
+    sort: saved.sort, desc: saved.desc,
+    onChange: function () { save(); render(); }
+  });
 
   // ---- tiny markdown ----
   function esc(s) { return s.replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
@@ -359,7 +357,7 @@ main .wrap { padding-block: 14px 40px; }
     r1.appendChild(el("span", "tid", t.id));
     if (t.priority) { var p = el("span", "pri " + t.priority); p.title = t.priority + " priority"; r1.appendChild(p); }
     r1.appendChild(el("span", "spacer"));
-    var dateField = ui.sort === "created" ? t.created : t.updated;
+    var dateField = ctl.sort === "created" ? t.created : t.updated;
     r1.appendChild(el("span", "date", shortDate(dateField)));
     b.appendChild(r1);
     b.appendChild(el("div", "ttl", t.title));
@@ -388,14 +386,10 @@ main .wrap { padding-block: 14px 40px; }
     Array.prototype.forEach.call($("chips").children, function (b) {
       b.setAttribute("aria-pressed", String(ui.on.indexOf(b.dataset.state) >= 0));
     });
-    $("dir").textContent = ui.desc ? "↓" : "↑";
-    $("dir").title = ui.desc ? "Descending" : "Ascending";
-    var f = SORTS[ui.sort] || SORTS.updated;
-    var rows = DATA.tasks.filter(function (t) {
-      if (ui.on.indexOf(t.state) < 0) return false;
-      if (!ui.q) return true;
-      return (t.id + " " + t.title + " " + t.labels.join(" ")).toLowerCase().indexOf(ui.q) >= 0;
-    }).sort(function (a, b) { var r = f(a, b) || cmpKey(a.k, b.k); return ui.desc ? -r : r; });
+    var rows = ctl.apply(
+      DATA.tasks.filter(function (t) { return ui.on.indexOf(t.state) >= 0; }),
+      function (t) { return t.id + " " + t.title + " " + t.labels.join(" "); },
+      function (a, b) { return cmpKey(a.k, b.k); });
     var list = $("list");
     list.textContent = "";
     $("count").textContent = rows.length + (rows.length === 1 ? " task" : " tasks") + " of " + DATA.tasks.length;

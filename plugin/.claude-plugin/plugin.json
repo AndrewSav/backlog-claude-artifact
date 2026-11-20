@@ -1,6 +1,6 @@
 {
   "name": "backlog-artifact",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Publishes a Backlog.md backlog as a phone-friendly page, either as a claude.ai Artifact or to your own backlog server, refreshed after turns that change it.",
   "author": {
     "name": "Andrew Savinykh"

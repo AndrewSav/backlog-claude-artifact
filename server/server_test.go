@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -409,5 +410,29 @@ func TestGoogleSignIn(t *testing.T) {
 	idp.nonce, idp.aud = "", "someone-else"
 	if _, resp, _ := login(); resp.StatusCode != 403 {
 		t.Fatalf("wrong audience: %d", resp.StatusCode)
+	}
+}
+
+func TestListControls(t *testing.T) {
+	f := newFixture(t)
+	for _, name := range []string{"Zeta", "alpha"} {
+		req, _ := http.NewRequest("PUT", f.ts.URL+"/api/projects/"+strings.ToLower(name), bytes.NewReader(body(name)))
+		req.Header.Set("Authorization", "Bearer "+publishTok)
+		do(t, nil, req)
+	}
+	resp, out := get(t, nil, f.ts.URL+"/", "Authorization", "Bearer "+viewTok)
+	if resp.StatusCode != 200 || !strings.Contains(out, `data-slug="alpha" data-name="alpha" data-tasks="3" data-updated="`) ||
+		!strings.Contains(out, `<div class="controls" id="controls" hidden>`) {
+		t.Fatalf("list: %d %s", resp.StatusCode, out)
+	}
+	// The shared controller is embedded, and the CSP allows exactly the script the page carries.
+	if !strings.Contains(listScript, "function listControls(o)") {
+		t.Fatal("shared list-controls.js is not embedded")
+	}
+	sum := sha256.Sum256([]byte(listScript))
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'sha256-"+base64.StdEncoding.EncodeToString(sum[:])+"'") ||
+		!strings.Contains(out, "<script>"+listScript+"</script>") {
+		t.Fatalf("script not allowed by csp %q", csp)
 	}
 }

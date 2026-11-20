@@ -24,6 +24,8 @@ import { spawnSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = path.join(HERE, 'template.html');
+// Also used by the backlog server's project list (see assets.go at the repo root).
+const LIST_CONTROLS_PATH = path.join(HERE, '..', 'shared', 'list-controls.js');
 const OUT_DIR_REL = path.join('.claude', 'backlog-artifact');
 
 // ---------- options ----------
@@ -230,6 +232,7 @@ export function buildModel(bl, opts) {
   const hash = crypto.createHash('sha256');
   // The renderer and template are part of the output, so a plugin update republishes.
   hash.update(fs.readFileSync(TEMPLATE_PATH));
+  hash.update(fs.readFileSync(LIST_CONTROLS_PATH));
   hash.update(fs.readFileSync(fileURLToPath(import.meta.url)));
   const home = opts.publishTarget === 'server' && opts.serverUrl ? opts.serverUrl + '/' : '';
   hash.update(JSON.stringify({ d: opts.includeDrafts, a: opts.includeArchived, t: opts.publishTarget, home }));
@@ -288,6 +291,7 @@ export function renderHtml(model) {
     .split(String.fromCharCode(0x2029)).join('\\u2029');
   return tpl
     .replace('__TITLE__', () => escHtml(`${model.project} Backlog`))
+    .replace('/*__LIST_CONTROLS__*/', () => fs.readFileSync(LIST_CONTROLS_PATH, 'utf8').trim())
     .replace('/*__DATA__*/null', () => json);
 }
 

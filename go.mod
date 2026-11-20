@@ -1,4 +1,4 @@
-module github.com/AndrewSav/backlog-claude-artifact/server
+module github.com/AndrewSav/backlog-claude-artifact
 
 go 1.27.0
 

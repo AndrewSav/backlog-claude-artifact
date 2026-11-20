@@ -74,7 +74,7 @@ The project's address is its `project_name` in lower case with hyphens, for exam
 
 ### Running the server
 
-The image is `andrewsav/backlog-server`, built by `.github/workflows/server-image.yml` on every push to `main` that touches `server/`. That workflow needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. It listens on port 8080 and is meant to sit behind a TLS-terminating proxy such as Traefik. The container starts as root only to take ownership of `DATA_DIR`, since Docker creates missing bind-mount folders as root. It then drops to uid 65532 before serving, so the data folder needs no manual `chown`. The config files must be readable by that user, which mode 644 (the default) is.
+The image is `andrewsav/backlog-server`, built by `.github/workflows/server-image.yml` on every push to `main` that touches the server's code (`server/`, `assets.go`, `go.mod`, or the shared `plugin/shared/` script). It builds from the repo root: `docker build -f server/Dockerfile .`. That workflow needs the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets. It listens on port 8080 and is meant to sit behind a TLS-terminating proxy such as Traefik. The container starts as root only to take ownership of `DATA_DIR`, since Docker creates missing bind-mount folders as root. It then drops to uid 65532 before serving, so the data folder needs no manual `chown`. The config files must be readable by that user, which mode 644 (the default) is.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -92,19 +92,19 @@ The three files are re-read when they change, so adding or removing a key needs 
 
 | Route | Who | What |
 |---|---|---|
-| `GET /` | viewer | List of published projects with per-state counts |
+| `GET /` | viewer | List of published projects with per-state counts, sortable and filterable |
 | `GET /p/<slug>` | viewer | The backlog page |
 | `GET /api/projects`, `GET /api/projects/<slug>` | viewer | JSON: the list, or one project with its full task data |
 | `PUT`/`DELETE /api/projects/<slug>` | publisher | Publish or remove a project |
 | `?key=<view token>` on any page | anyone | Signs the browser in for 30 days and redirects without the key |
 | `/auth/login`, `/auth/logout` | anyone | Google sign-in and sign-out |
 
-Run the server's tests with `cd server && go test ./...`.
+Run the server's tests with `go test ./...` from the repo root.
 
 ## Commands
 
 - `/backlog-artifact:publish` renders and publishes now, ignoring the interval. In server mode it uploads directly. In a project that was unpublished, it turns publishing back on.
-- `/backlog-artifact:unpublish` removes this project's page from the server (or has Claude delete its artifact) and turns publishing off for this project only. Other projects keep publishing. Both commands do their work in the `Stop` hook at the end of the turn, because plugin options reach only hook processes, and they show the result there. The setting lives in `.claude/backlog-artifact/state.json`, which is kept out of git, so it never touches the repo. Running it before the first publish just opts the project out. To remove a page for a project that isn't on this machine, run `node scripts/backlog-artifact.mjs unpublish --slug <slug>` with the plugin options set as `CLAUDE_PLUGIN_OPTION_*` environment variables.
+- `/backlog-artifact:unpublish` removes this project's page from the server (or has Claude delete its artifact) and turns publishing off for this project only. Other projects keep publishing. Both commands do their work in the `Stop` hook at the end of the turn, because plugin options reach only hook processes, and they show the result there. The setting lives in `.claude/backlog-artifact/state.json`, which is kept out of git, so it never touches the repo. Running it before the first publish just opts the project out. To remove a page for a project that isn't on this machine, run `node plugin/scripts/backlog-artifact.mjs unpublish --slug <slug>` with the plugin options set as `CLAUDE_PLUGIN_OPTION_*` environment variables.
 
 To keep the plugin out of a project completely, so it doesn't even render the page, disable it in that project's `.claude/settings.local.json`: `{ "enabledPlugins": { "backlog-artifact@backlog-artifact": false } }`.
 
@@ -133,10 +133,12 @@ If Claude Code asks for permission every time Claude publishes, add the Artifact
 
 ## Development
 
+The plugin is everything under `plugin/`; that folder is all an install copies. The server is `server/`, built from the Go module at the repo root. `plugin/shared/list-controls.js` (sort menu, direction button, filter box) is used by both: the plugin inlines it into the backlog page, and the server embeds it through `assets.go` for its project list.
+
 ```
-node --test test/*.test.mjs
-node scripts/backlog-artifact.mjs render path/to/repo   # prints a summary
-claude --plugin-dir .                                    # try it in a session
+node --test plugin/test/*.test.mjs
+node plugin/scripts/backlog-artifact.mjs render path/to/repo   # prints a summary
+claude --plugin-dir plugin                                      # try it in a session
 ```
 
 Set `BACKLOG_ARTIFACT_OUT_DIR` to write renders somewhere other than the repo.
