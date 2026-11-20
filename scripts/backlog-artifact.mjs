@@ -413,30 +413,46 @@ export function sshSign(message, opts) {
   }
 }
 
-export async function uploadToServer(r, opts, { fetchImpl = fetch, sign = sshSign, now = Date.now() } = {}) {
+// Sends an authorized request for one project: a Bearer token if server_key
+// is set, otherwise an SSH signature over the method, slug, time and body.
+async function serverRequest(method, slug, body, opts, { fetchImpl = fetch, sign = sshSign, now = Date.now() } = {}) {
   if (!opts.serverUrl) throw new Error('the server_url option is empty');
-  const slug = slugify(r.model.project);
-  const { hash, ...data } = r.model;
-  const body = JSON.stringify({ project: r.model.project, html: fs.readFileSync(r.paths.html, 'utf8'), data });
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = body ? { 'Content-Type': 'application/json' } : {};
   if (opts.serverKey) {
     headers.Authorization = `Bearer ${opts.serverKey}`;
   } else {
     const ts = String(Math.floor(now / 1000));
     headers['X-Backlog-Timestamp'] = ts;
-    headers['X-Backlog-Signature'] = Buffer.from(sign(signedMessage('PUT', slug, ts, body), opts)).toString('base64');
+    headers['X-Backlog-Signature'] = Buffer.from(sign(signedMessage(method, slug, ts, body), opts)).toString('base64');
   }
   let res;
   try {
-    res = await fetchImpl(`${opts.serverUrl}/api/projects/${slug}`, { method: 'PUT', headers, body, signal: AbortSignal.timeout(10_000) });
+    res = await fetchImpl(`${opts.serverUrl}/api/projects/${slug}`, { method, headers, body: body || undefined, signal: AbortSignal.timeout(10_000) });
   } catch (e) {
     throw new Error(`could not reach ${opts.serverUrl} (${(e && e.cause && e.cause.code) || (e && e.message) || e})`);
   }
   const text = await res.text();
   let json = {};
   try { json = JSON.parse(text); } catch { /* not JSON */ }
-  if (!res.ok) throw new Error(`the server answered ${res.status}: ${json.error || text.slice(0, 200)}`);
+  const fail = () => new Error(`the server answered ${res.status}: ${json.error || text.slice(0, 200)}`);
+  return { res, json, fail };
+}
+
+export async function uploadToServer(r, opts, deps = {}) {
+  const slug = slugify(r.model.project);
+  const { hash, ...data } = r.model;
+  const body = JSON.stringify({ project: r.model.project, html: fs.readFileSync(r.paths.html, 'utf8'), data });
+  const { res, json, fail } = await serverRequest('PUT', slug, body, opts, deps);
+  if (!res.ok) throw fail();
   return json.url || `${opts.serverUrl}/p/${slug}`;
+}
+
+// Removes a project's page. Returns false if the server had no such project.
+export async function deleteFromServer(slug, opts, deps = {}) {
+  const { res, fail } = await serverRequest('DELETE', slug, '', opts, deps);
+  if (res.status === 404) return false;
+  if (!res.ok) throw fail();
+  return true;
 }
 
 const RETRY_AFTER_FAILURE_MS = 60_000;
@@ -481,6 +497,8 @@ function projectDir(input) {
 export function decideStop({ input, root, opts, now = Date.now(), entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT || '' }) {
   if (input.stop_hook_active) return { action: 'none', why: 'stop_hook_active' };
   if (!findBacklog(root)) return { action: 'none', why: 'no backlog' };
+  // Opted out with /backlog-artifact:unpublish: leave the project alone entirely.
+  if (loadState(outPaths(root).state).disabled) return { action: 'none', why: 'disabled' };
   const r = renderProject(root, opts);
   if (!opts.autoPublish) return { action: 'none', why: 'auto_publish off', r };
   // Server uploads cost no model tokens, so they need no throttle and work headless too.
@@ -520,6 +538,37 @@ export function recordPublish({ input, root, now = Date.now() }) {
   return true;
 }
 
+// Turns publishing off for a project and removes what it published. The
+// server page is deleted here; only Claude can delete an artifact, so for
+// that the returned text tells Claude what to call.
+export async function unpublishProject(root, opts, { remove = deleteFromServer } = {}) {
+  const bl = findBacklog(root);
+  const p = outPaths(root);
+  const st = loadState(p.state);
+  st.disabled = true;
+  delete st.lastPublishedHash;
+  delete st.pendingHash;
+  const lines = [];
+  if (bl && (opts.publishTarget === 'server' || st.serverPageUrl)) {
+    const slug = slugify(buildModel(bl, opts).project);
+    try {
+      lines.push(await remove(slug, opts)
+        ? `Removed /p/${slug} from ${opts.serverUrl}.`
+        : `${opts.serverUrl} has no /p/${slug}, so there was nothing to remove.`);
+      delete st.serverPageUrl;
+    } catch (e) {
+      lines.push(`Could not remove /p/${slug} from the server: ${(e && e.message) || e}.`);
+    }
+  }
+  if (st.url) {
+    lines.push(`This project was also published as the artifact ${st.url}. Delete it with the Artifact tool: action "delete", url "${st.url}".`);
+    delete st.url;
+  }
+  saveState(p.state, st);
+  lines.push('Publishing is now off for this project. /backlog-artifact:publish turns it back on.');
+  return lines.join('\n');
+}
+
 async function main() {
   const [cmd, arg] = process.argv.slice(2);
   const opts = readOptions();
@@ -542,6 +591,8 @@ async function main() {
     const root = projectDir({});
     const r = renderProject(root, opts);
     if (!r) { console.log(`No Backlog.md backlog found: ${path.join(root, 'backlog', 'config.yml')} does not exist.`); return; }
+    const was = loadState(r.paths.state);
+    if (was.disabled) { delete was.disabled; saveState(r.paths.state, was); }
     if (opts.publishTarget === 'server') {
       const res = await publishToServer(r, opts, { force: true });
       console.log(res.url
@@ -555,6 +606,17 @@ async function main() {
     console.log(instruction(r.paths.html, st, process.env.CLAUDE_SESSION_ID || ''));
     return;
   }
+  if (cmd === 'unpublish') {
+    if (arg === '--slug') {
+      // Removes a page by its address, for a project that isn't on this machine.
+      const slug = process.argv[4];
+      if (!slug) { console.error('usage: backlog-artifact.mjs unpublish --slug <slug>'); process.exitCode = 2; return; }
+      console.log(await deleteFromServer(slug, opts) ? `Removed /p/${slug} from ${opts.serverUrl}.` : `${opts.serverUrl} has no /p/${slug}.`);
+      return;
+    }
+    console.log(await unpublishProject(path.resolve(arg || projectDir({})), opts));
+    return;
+  }
   if (cmd === 'render') {
     const root = path.resolve(arg || projectDir({}));
     const r = renderProject(root, opts);
@@ -564,7 +626,7 @@ async function main() {
     console.log(JSON.stringify({ project: r.model.project, states: r.model.states, defaultOn: r.model.defaultOn, tasks: r.model.tasks.length, counts, bytes: r.bytes, html: r.paths.html }, null, 2));
     return;
   }
-  console.error('usage: backlog-artifact.mjs stop|record|instructions|render [dir]');
+  console.error('usage: backlog-artifact.mjs stop|record|instructions|unpublish|render [dir]');
   process.exitCode = 2;
 }
 

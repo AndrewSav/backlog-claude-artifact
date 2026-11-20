@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   parseYaml, parseTask, idKey, buildModel, findBacklog, decideStop, recordPublish,
   loadState, outPaths, readOptions, uploadToServer, publishToServer, signedMessage, slugify,
+  deleteFromServer, unpublishProject,
 } from '../scripts/backlog-artifact.mjs';
 
 const OPTS = { includeDrafts: false, includeArchived: false, autoPublish: true, intervalMinutes: 15 };
@@ -196,6 +197,43 @@ test('server mode with SSH signs the exact body, slug and method', async () => {
   assert.equal(signed, signedMessage('PUT', 'demo', '1800000000', init.body));
   assert.equal(slugify('Game servers'), 'game-servers');
   assert.equal(slugify('  ÜeSave/Game  '), 'uesave-game');
+});
+
+test('unpublish deletes the page, and opts the project out', async () => {
+  process.env.BACKLOG_ARTIFACT_OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bla-out-'));
+  const root = makeRepo();
+  const opts = { ...OPTS, publishTarget: 'server', serverUrl: 'http://srv.test', serverKey: 'tok' };
+  const d = decideStop({ input: {}, root, opts });
+  await publishToServer(d.r, opts, { upload: async () => 'http://srv.test/p/demo' });
+
+  let removed;
+  const msg = await unpublishProject(root, opts, { remove: async (slug) => { removed = slug; return true; } });
+  assert.equal(removed, 'demo');
+  assert.match(msg, /Removed \/p\/demo/);
+  const st = loadState(outPaths(root).state);
+  assert.equal(st.disabled, true);
+  assert.equal(st.serverPageUrl, undefined);
+  assert.equal(decideStop({ input: {}, root, opts }).why, 'disabled');
+
+  // A DELETE is signed over an empty body, and 404 means already gone.
+  let init, signed;
+  const gone = await deleteFromServer('demo', { ...opts, serverKey: '' }, {
+    now: 1_800_000_000_000,
+    sign: (m) => { signed = m; return 'SIG'; },
+    fetchImpl: async (u, i) => { init = i; return new Response('{"error":"no such project"}', { status: 404 }); },
+  });
+  assert.equal(gone, false);
+  assert.equal(init.method, 'DELETE');
+  assert.equal(signed, signedMessage('DELETE', 'demo', '1800000000', ''));
+
+  // Artifact mode: Claude is told to delete the artifact.
+  const root2 = makeRepo();
+  const p2 = outPaths(root2);
+  fs.mkdirSync(p2.dir, { recursive: true });
+  fs.writeFileSync(p2.state, JSON.stringify({ url: 'https://claude.ai/artifact/abc' }));
+  const msg2 = await unpublishProject(root2, OPTS, { remove: async () => assert.fail('no server call in artifact mode') });
+  assert.match(msg2, /action "delete", url "https:\/\/claude\.ai\/artifact\/abc"/);
+  assert.equal(loadState(p2.state).url, undefined);
 });
 
 test('no backlog: nothing happens', () => {
