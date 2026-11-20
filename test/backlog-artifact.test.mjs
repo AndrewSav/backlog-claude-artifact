@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   parseYaml, parseTask, idKey, buildModel, findBacklog, decideStop, recordPublish,
   loadState, outPaths, readOptions, uploadToServer, publishToServer, signedMessage, slugify,
-  deleteFromServer, unpublishProject,
+  deleteFromServer, unpublishProject, recordRequest, runRequest,
 } from '../scripts/backlog-artifact.mjs';
 
 const OPTS = { includeDrafts: false, includeArchived: false, autoPublish: true, intervalMinutes: 15 };
@@ -234,6 +234,33 @@ test('unpublish deletes the page, and opts the project out', async () => {
   const msg2 = await unpublishProject(root2, OPTS, { remove: async () => assert.fail('no server call in artifact mode') });
   assert.match(msg2, /action "delete", url "https:\/\/claude\.ai\/artifact\/abc"/);
   assert.equal(loadState(p2.state).url, undefined);
+});
+
+test('slash-command requests run in the Stop hook, which has the options', async () => {
+  process.env.BACKLOG_ARTIFACT_OUT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bla-out-'));
+  const root = makeRepo();
+  const opts = { ...OPTS, publishTarget: 'server', serverUrl: 'http://srv.test', serverKey: 'tok' };
+  assert.equal(await runRequest({ input: {}, root, opts }), null);
+
+  assert.match(recordRequest(root, 'unpublish'), /when this turn ends/);
+  let removed;
+  const out = await runRequest({ input: {}, root, opts, deps: { remove: async (s) => { removed = s; return true; } } });
+  assert.equal(removed, 'demo');
+  assert.match(out.systemMessage, /Removed \/p\/demo from http:\/\/srv\.test/);
+  assert.equal(loadState(outPaths(root).state).request, undefined);
+  assert.equal(decideStop({ input: {}, root, opts }).why, 'disabled');
+
+  recordRequest(root, 'publish');
+  const pub = await runRequest({ input: {}, root, opts, deps: { upload: async () => 'http://srv.test/p/demo' } });
+  assert.equal(pub.systemMessage, 'Backlog published: http://srv.test/p/demo');
+  assert.equal(loadState(outPaths(root).state).disabled, undefined);
+
+  // Artifact mode: publish asks Claude; a request never runs on the re-entered stop.
+  recordRequest(root, 'publish');
+  assert.equal(await runRequest({ input: { stop_hook_active: true }, root, opts: OPTS }), null);
+  const art = await runRequest({ input: {}, root, opts: OPTS });
+  assert.equal(art.decision, 'block');
+  assert.match(art.reason, /Artifact tool/);
 });
 
 test('no backlog: nothing happens', () => {

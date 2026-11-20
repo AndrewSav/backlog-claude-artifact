@@ -27,9 +27,11 @@ claude plugin install backlog-artifact@backlog-artifact
 
 Inside Claude Code:
 
-1. `/plugin marketplace update backlog-artifact` refreshes the marketplace.
-2. In `/plugin`, go to the **Installed** tab, select backlog-artifact and choose **Update now**. There is no slash command for this step.
-3. `/reload-plugins` applies the update without restarting.
+```
+/plugin marketplace update backlog-artifact
+```
+
+This updates the plugin and reloads it, so no restart is needed.
 
 Or from a terminal (the update loads in your next session):
 
@@ -102,7 +104,7 @@ Run the server's tests with `cd server && go test ./...`.
 ## Commands
 
 - `/backlog-artifact:publish` renders and publishes now, ignoring the interval. In server mode it uploads directly. In a project that was unpublished, it turns publishing back on.
-- `/backlog-artifact:unpublish` removes this project's page from the server (or has Claude delete its artifact) and turns publishing off for this project only. Other projects keep publishing. The setting lives in `.claude/backlog-artifact/state.json`, which is kept out of git, so it never touches the repo. Running it before the first publish just opts the project out. To remove a page for a project that isn't on this machine, run `node scripts/backlog-artifact.mjs unpublish --slug <slug>` with the plugin options set as `CLAUDE_PLUGIN_OPTION_*` environment variables.
+- `/backlog-artifact:unpublish` removes this project's page from the server (or has Claude delete its artifact) and turns publishing off for this project only. Other projects keep publishing. Both commands do their work in the `Stop` hook at the end of the turn, because plugin options reach only hook processes, and they show the result there. The setting lives in `.claude/backlog-artifact/state.json`, which is kept out of git, so it never touches the repo. Running it before the first publish just opts the project out. To remove a page for a project that isn't on this machine, run `node scripts/backlog-artifact.mjs unpublish --slug <slug>` with the plugin options set as `CLAUDE_PLUGIN_OPTION_*` environment variables.
 
 To keep the plugin out of a project completely, so it doesn't even render the page, disable it in that project's `.claude/settings.local.json`: `{ "enabledPlugins": { "backlog-artifact@backlog-artifact": false } }`.
 

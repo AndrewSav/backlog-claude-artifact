@@ -7,7 +7,12 @@
 //                 directly (no model involvement); in artifact mode, when the throttle
 //                 allows, blocks the stop with an instruction to publish.
 //   record        PostToolUse hook for the Artifact tool. Saves the artifact URL.
-//   instructions  Renders and prints the publish instruction (used by /backlog-artifact:publish).
+//   request publish|unpublish
+//                 Used by the slash commands. Records the request; the Stop hook at the
+//                 end of the same turn carries it out. Plugin options reach only hook
+//                 processes (as CLAUDE_PLUGIN_OPTION_*), not a command's shell lines.
+//   unpublish [dir] | unpublish --slug <slug>
+//                 Removes a page directly. Needs the options set in the environment.
 //   render [dir]  Renders and prints a summary. For testing.
 
 import fs from 'node:fs';
@@ -569,12 +574,60 @@ export async function unpublishProject(root, opts, { remove = deleteFromServer }
   return lines.join('\n');
 }
 
+// Records a slash-command request for the Stop hook. Returns what Claude
+// should tell the user now.
+export function recordRequest(root, what) {
+  if (!findBacklog(root)) return `No Backlog.md backlog found: ${path.join(root, 'backlog', 'config.yml')} does not exist. Tell the user that in one line.`;
+  const p = outPaths(root);
+  const st = loadState(p.state);
+  st.request = what;
+  saveState(p.state, st);
+  const verb = what === 'publish' ? 'publish the backlog' : 'remove the published backlog and turn publishing off for this project';
+  return `The backlog-artifact plugin will ${verb} when this turn ends, and will show the result itself. Tell the user that in one short line and end the turn. Do not call any tool.`;
+}
+
+// Carries out a pending slash-command request. Returns the hook output, or
+// null when there is no request.
+export async function runRequest({ input, root, opts, entrypoint = '', deps = {} }) {
+  if (input.stop_hook_active) return null;
+  const p = outPaths(root);
+  const st = loadState(p.state);
+  const what = st.request;
+  if (!what) return null;
+  delete st.request;
+  saveState(p.state, st);
+  if (what === 'unpublish') {
+    const hadArtifact = Boolean(st.url);
+    const msg = await unpublishProject(root, opts, deps);
+    if (hadArtifact) return { decision: 'block', reason: `${msg}\nThen tell the user the outcome in one or two lines.` };
+    return { systemMessage: `backlog-artifact: ${msg.replace(/\n/g, ' ')}` };
+  }
+  // publish: turn publishing back on and publish now, ignoring the interval.
+  delete st.disabled;
+  saveState(p.state, st);
+  const r = renderProject(root, opts);
+  if (!r) return null;
+  if (opts.publishTarget === 'server') {
+    const res = await publishToServer(r, opts, { force: true, ...deps });
+    return { systemMessage: res.url ? `Backlog published: ${res.url}` : `backlog-artifact: could not publish the backlog: ${res.error}` };
+  }
+  if (/^sdk/.test(entrypoint)) return null;
+  const s2 = loadState(r.paths.state);
+  s2.pendingHash = r.model.hash;
+  s2.lastAskedAt = Date.now();
+  saveState(r.paths.state, s2);
+  return { decision: 'block', reason: instruction(r.paths.html, s2, input.session_id) };
+}
+
 async function main() {
   const [cmd, arg] = process.argv.slice(2);
   const opts = readOptions();
   if (cmd === 'stop') {
     const input = readStdin();
-    const d = decideStop({ input, root: projectDir(input), opts });
+    const root = projectDir(input);
+    const out = await runRequest({ input, root, opts, entrypoint: process.env.CLAUDE_CODE_ENTRYPOINT || '' });
+    if (out) { process.stdout.write(JSON.stringify(out)); return; }
+    const d = decideStop({ input, root, opts });
     if (d.action === 'block') process.stdout.write(JSON.stringify({ decision: 'block', reason: d.reason }));
     if (d.action === 'upload') {
       const res = await publishToServer(d.r, opts);
@@ -582,28 +635,14 @@ async function main() {
     }
     return;
   }
+  if (cmd === 'request') {
+    if (arg !== 'publish' && arg !== 'unpublish') { console.error('usage: backlog-artifact.mjs request publish|unpublish'); process.exitCode = 2; return; }
+    console.log(recordRequest(projectDir({}), arg));
+    return;
+  }
   if (cmd === 'record') {
     const input = readStdin();
     recordPublish({ input, root: projectDir(input) });
-    return;
-  }
-  if (cmd === 'instructions') {
-    const root = projectDir({});
-    const r = renderProject(root, opts);
-    if (!r) { console.log(`No Backlog.md backlog found: ${path.join(root, 'backlog', 'config.yml')} does not exist.`); return; }
-    const was = loadState(r.paths.state);
-    if (was.disabled) { delete was.disabled; saveState(r.paths.state, was); }
-    if (opts.publishTarget === 'server') {
-      const res = await publishToServer(r, opts, { force: true });
-      console.log(res.url
-        ? `The backlog-artifact plugin already published the backlog to ${res.url}. Tell the user that URL in one line; do not call the Artifact tool.`
-        : `Publishing the backlog to the server failed: ${res.error}. Tell the user that in one line; do not call the Artifact tool.`);
-      return;
-    }
-    const st = loadState(r.paths.state);
-    st.pendingHash = r.model.hash;
-    saveState(r.paths.state, st);
-    console.log(instruction(r.paths.html, st, process.env.CLAUDE_SESSION_ID || ''));
     return;
   }
   if (cmd === 'unpublish') {
@@ -626,7 +665,7 @@ async function main() {
     console.log(JSON.stringify({ project: r.model.project, states: r.model.states, defaultOn: r.model.defaultOn, tasks: r.model.tasks.length, counts, bytes: r.bytes, html: r.paths.html }, null, 2));
     return;
   }
-  console.error('usage: backlog-artifact.mjs stop|record|instructions|unpublish|render [dir]');
+  console.error('usage: backlog-artifact.mjs stop|record|request|unpublish|render [dir]');
   process.exitCode = 2;
 }
 

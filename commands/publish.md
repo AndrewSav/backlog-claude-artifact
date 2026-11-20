@@ -1,11 +1,9 @@
 ---
-description: Render this repo's Backlog.md backlog and publish it as an Artifact now
+description: Publish this repo's Backlog.md backlog now, and turn publishing back on if it was off
 allowed-tools: Bash(node:*), Artifact
 disable-model-invocation: true
 ---
 
-Publish instruction from the backlog-artifact plugin:
+!`node "${CLAUDE_PLUGIN_ROOT}/scripts/backlog-artifact.mjs" request publish`
 
-!`node "${CLAUDE_PLUGIN_ROOT}/scripts/backlog-artifact.mjs" instructions`
-
-If no instruction appears above, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/backlog-artifact.mjs" instructions` with Bash and use its output. Follow the instruction. If it says no backlog was found, tell the user that in one line and stop.
+If no text appears above, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/backlog-artifact.mjs" request publish` with Bash and follow its output.
